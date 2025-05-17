@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+from datetime import datetime as dt  # ✅ potrzebne do dt.strptime
 import pandas as pd
 import requests
 from flask import Flask, request, jsonify
@@ -9,6 +10,17 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 CORS(app)
+
+# ✅ Weryfikacja zmiennych środowiskowych (opcjonalna, ale zalecana)
+REQUIRED_ENV_VARS = [
+    "GOOGLE_MAPS_API_KEY",
+    "GOOGLE_CALENDAR_ID",
+    "ADDRESS_SHEET_URL",
+    "SERVICES_SHEET_URL"
+]
+missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+if missing:
+    raise RuntimeError(f"Brakuje zmiennych środowiskowych: {', '.join(missing)}")
 
 # GOOGLE ENV VARS
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
@@ -32,39 +44,58 @@ def index():
 # -------------------- GDZIE --------------------
 
 def get_local_addresses():
-    sheet_url = ADDRESS_SHEET_URL
-    sheet_csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
-    df = pd.read_csv(sheet_csv_url)
+    """
+    Pobiera listę lokalnych adresów z arkusza Google Sheets.
+    Zwraca adresy w formacie: "Ulica Nr domu, Miasto"
+    """
+    try:
+        sheet_url = ADDRESS_SHEET_URL
+        csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+        df = pd.read_csv(csv_url)
 
-    addresses = [
-        f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip()
-        for _, row in df.iterrows()
-    ]
-    return addresses
+        addresses = [
+            f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip()
+            for _, row in df.iterrows()
+        ]
+        return addresses
+    except Exception as e:
+        print(f"Błąd wczytywania lokalnych adresów: {e}")
+        return []
 
 def calculate_distance_km(origin, destination):
-    url = f"https://maps.googleapis.com/maps/api/distancematrix/json"
-    params = {
-        "origins": origin,
-        "destinations": destination,
-        "key": GOOGLE_MAPS_API_KEY,
-        "language": "pl"
-    }
-    response = requests.get(url, params=params).json()
+    """
+    Oblicza dystans w kilometrach pomiędzy dwoma adresami
+    przy użyciu Google Distance Matrix API.
+    """
     try:
+        url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+        params = {
+            "origins": origin,
+            "destinations": destination,
+            "key": GOOGLE_MAPS_API_KEY,
+            "language": "pl"
+        }
+        response = requests.get(url, params=params).json()
         meters = response["rows"][0]["elements"][0]["distance"]["value"]
         return round(meters / 1000.0, 2)
-    except Exception:
+    except Exception as e:
+        print(f"Błąd obliczania dystansu: {e}")
         return None
 
 @app.route("/pricing/location-modifier")
 def location_modifier():
+    """
+    Endpoint: /pricing/location-modifier
+    Oblicza modyfikator ceny na podstawie lokalizacji klienta.
+    """
     address = request.args.get("address")
     if not address:
         return jsonify({"error": "Brak adresu"}), 400
 
     try:
         local_addresses = get_local_addresses()
+
+        # Jeśli adres znajduje się na liście lokalnych
         if any(address.lower() in a.lower() for a in local_addresses):
             return jsonify({
                 "location_type": "local_list",
@@ -73,6 +104,7 @@ def location_modifier():
                 "distance_km": 0.0
             })
 
+        # W przeciwnym razie obliczamy odległość
         distance = calculate_distance_km(BASE_ADDRESS, address)
         if distance is None:
             return jsonify({"error": "Nie udało się obliczyć odległości"}), 500
@@ -99,6 +131,11 @@ def location_modifier():
 
 @app.route("/pricing/when-modifier")
 def when_modifier():
+    """
+    Endpoint: /pricing/when-modifier
+    Zwraca typ wizyty (np. NATYCHMIASTOWA, STANDARD) i odpowiadający modyfikator
+    na podstawie różnicy między datą dzisiejszą a podaną datą realizacji.
+    """
     date_str = request.args.get("date")
     if not date_str:
         return jsonify({"error": "Brak daty"}), 400
@@ -120,42 +157,60 @@ def when_modifier():
             return jsonify({"type": "PLANOWA", "modifier": 0.9})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+        return jsonify({"error": f"Błąd w przetwarzaniu daty: {str(e)}"}), 500
+        
 # -------------------- BASE PRICE --------------------
 
 @app.route("/pricing/base-price")
 def base_price():
+    """
+    Endpoint: /pricing/base-price?service=Nazwa
+    Zwraca ceny netto i brutto (8% i 23%) oraz czas realizacji dla podanej usługi.
+    """
     service_name = request.args.get("service")
     if not service_name:
         return jsonify({"error": "Brak nazwy usługi"}), 400
 
     try:
         sheet_url = SERVICES_SHEET_URL
+        if not sheet_url:
+            return jsonify({"error": "Brak URL do arkusza usług"}), 500
+
         csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
         df = pd.read_csv(csv_url)
 
-        row = df[df["Usługa"] == service_name].iloc[0]
+        # Czyszczenie danych z błędnych znaków i formatowanie liczb
+        for col in ["Cena netto", "Brutto 8%", "Brutto 23%"]:
+            df[col] = df[col].astype(str).str.replace("\xa0", "", regex=False)
+            df[col] = df[col].str.replace(" ", "", regex=False)
+            df[col] = df[col].str.replace(",", ".", regex=False)
+            df[col] = df[col].astype(float)
+
+        # Dopasowanie usługi bez względu na wielkość liter i spacje
+        row = df[df["Usługa"].str.lower().str.strip() == service_name.lower().strip()]
+
+        if row.empty:
+            return jsonify({"error": "Nie znaleziono usługi w arkuszu"}), 404
+
+        row = row.iloc[0]
 
         result = {
             "service": row["Usługa"],
-            "netto": float(str(row["Cena netto"]).replace(",", ".")),
-            "brutto_8": float(str(row["Brutto 8%"]).replace(",", ".")),
-            "brutto_23": float(str(row["Brutto 23%"]).replace(",", ".")),
+            "netto": row["Cena netto"],
+            "brutto_8": row["Brutto 8%"],
+            "brutto_23": row["Brutto 23%"],
             "czas": str(row["czas"])
         }
 
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Błąd pobierania ceny: {str(e)}"}), 500
 
-
-# -------------------- SLOT MODIFIER --------------------
 
 from datetime import datetime, time
 
-# Stałe slotów
+# Stałe slotów czasowych
 SLOT_A = {"name": "A", "days": [0, 1, 2, 3, 4], "start": time(8, 0), "end": time(14, 0), "locations": ["local_list"], "modifier": 0.9}
 SLOT_B = {"name": "B", "days": [0, 1, 2, 3, 4], "start": time(14, 0), "end": time(18, 0), "locations": ["local_list", "distance_local", "distance_far"], "modifier": 1.0}
 SLOT_C = {"name": "C", "days": [0, 1, 2, 3, 4], "start": time(8, 0), "end": time(18, 0), "locations": ["distance_local", "distance_far"]}
@@ -164,85 +219,92 @@ SLOT_E = {"name": "E", "days": [5, 6], "start": time(7, 0), "end": time(11, 0), 
 SLOT_NOW = {"name": "NOW", "days": list(range(7)), "start": time(8, 0), "end": time(22, 0), "locations": ["local_list", "distance_local", "distance_far"]}
 
 def calculate_dynamic_modifier(load, base_min, base_max):
-    """Interpoluje modyfikator na podstawie obciążenia."""
+    """Interpoluje modyfikator cenowy na podstawie liczby wydarzeń danego dnia."""
     max_tasks = 20
     if load <= 0:
         return base_min
     elif load >= max_tasks:
         return base_max
-    else:
-        return round(base_min + (base_max - base_min) * (load / max_tasks), 2)
+    return round(base_min + (base_max - base_min) * (load / max_tasks), 2)
 
 def determine_slot(date_str, time_str, urgency, location, override=False):
-    visit_date = datetime.strptime(date_str, "%Y-%m-%d")
-    visit_time = datetime.strptime(time_str, "%H:%M").time()
-    weekday = visit_date.weekday()
-    load = get_calendar_load(date_str)
+    """Zwraca slot czasowy i modyfikator cenowy na podstawie danych wejściowych."""
+    try:
+        visit_date = datetime.strptime(date_str, "%Y-%m-%d")
+        visit_time = datetime.strptime(time_str, "%H:%M").time()
+        weekday = visit_date.weekday()
+        load = get_calendar_load(date_str)
 
-    # Slot NATYCHMIASTOWY (wymuszony lub tryb NATYCHMIASTOWA)
-    if urgency == "NATYCHMIASTOWA" or override:
-        modifier = calculate_dynamic_modifier(load, 1.5, 3.0)
-        return {"slot": "NOW", "modifier": modifier}
+        # Slot NATYCHMIASTOWY (ma pierwszeństwo)
+        if override or urgency == "NATYCHMIASTOWA":
+            modifier = calculate_dynamic_modifier(load, 1.5, 3.0)
+            return {"slot": "NOW", "modifier": modifier}
 
-    # SLOT A
-    if location == "local_list" and weekday in SLOT_A["days"] and SLOT_A["start"] <= visit_time < SLOT_A["end"]:
-        return {"slot": "A", "modifier": SLOT_A["modifier"]}
+        # SLOT A
+        if location == "local_list" and weekday in SLOT_A["days"] and SLOT_A["start"] <= visit_time < SLOT_A["end"]:
+            return {"slot": "A", "modifier": SLOT_A["modifier"]}
 
-    # SLOT B
-    if location in SLOT_B["locations"] and weekday in SLOT_B["days"] and SLOT_B["start"] <= visit_time < SLOT_B["end"]:
-        return {"slot": "B", "modifier": SLOT_B["modifier"]}
+        # SLOT B
+        if location in SLOT_B["locations"] and weekday in SLOT_B["days"] and SLOT_B["start"] <= visit_time < SLOT_B["end"]:
+            return {"slot": "B", "modifier": SLOT_B["modifier"]}
 
-    # SLOT C
-    if location in SLOT_C["locations"] and weekday in SLOT_C["days"] and SLOT_C["start"] <= visit_time < SLOT_C["end"]:
-        modifier = calculate_dynamic_modifier(load, 0.85, 1.2)
-        return {"slot": "C", "modifier": modifier}
+        # SLOT C (dynamiczny)
+        if location in SLOT_C["locations"] and weekday in SLOT_C["days"] and SLOT_C["start"] <= visit_time < SLOT_C["end"]:
+            modifier = calculate_dynamic_modifier(load, 0.85, 1.2)
+            return {"slot": "C", "modifier": modifier}
 
-    # SLOT D
-    if location in SLOT_D["locations"] and weekday in SLOT_D["days"] and SLOT_D["start"] <= visit_time < SLOT_D["end"]:
-        return {"slot": "D", "modifier": SLOT_D["modifier"]}
+        # SLOT D
+        if location in SLOT_D["locations"] and weekday in SLOT_D["days"] and SLOT_D["start"] <= visit_time < SLOT_D["end"]:
+            return {"slot": "D", "modifier": SLOT_D["modifier"]}
 
-    # SLOT E
-    if location in SLOT_E["locations"] and weekday in SLOT_E["days"] and SLOT_E["start"] <= visit_time < SLOT_E["end"]:
-        if weekday == 5:
-            return {"slot": "E", "modifier": "+50zł"}
-        elif weekday == 6:
-            return {"slot": "E", "modifier": "+60zł"}
+        # SLOT E (weekendowy – kwotowy)
+        if location in SLOT_E["locations"] and weekday in SLOT_E["days"] and SLOT_E["start"] <= visit_time < SLOT_E["end"]:
+            return {"slot": "E", "modifier": "+50zł" if weekday == 5 else "+60zł"}
 
-    return {"slot": "UNKNOWN", "modifier": 1.0}
+        # Domyślny slot
+        return {"slot": "UNKNOWN", "modifier": 1.0}
+    except Exception as e:
+        return {"slot": "ERROR", "modifier": 1.0, "error": str(e)}
 
 @app.route("/pricing/slot-modifier")
 def slot_modifier():
-    try:
-        date_str = request.args.get("date")
-        time_str = request.args.get("time")
-        urgency = request.args.get("urgency")
-        location = request.args.get("location")
-        override = request.args.get("override", "false").lower() == "true"
+    """API: Zwraca slot i modyfikator dla podanych parametrów czasowych."""
+    date_str = request.args.get("date")
+    time_str = request.args.get("time")
+    urgency = request.args.get("urgency")
+    location = request.args.get("location")
+    override = request.args.get("override", "false").lower() == "true"
 
-        result = determine_slot(date_str, time_str, urgency, location, override)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    if not all([date_str, time_str, urgency, location]):
+        return jsonify({"error": "Brakuje wymaganych parametrów"}), 400
 
+    result = determine_slot(date_str, time_str, urgency, location, override)
+
+    if "error" in result:
+        return jsonify({"error": result["error"]}), 500
+
+    return jsonify(result)
+    
 # ------------------ OBLICZANIE OBCIĄŻENIA DNIA (8:00–22:00) ------------------
 
 def get_calendar_load(date_str):
+    """
+    Pobiera liczbę wydarzeń z calendar-service dla podanego dnia (8:00–22:00).
+    """
     try:
-        service = get_calendar_service()
-        start = dt.strptime(date_str, "%Y-%m-%d").replace(hour=8, minute=0).isoformat() + "Z"
-        end = dt.strptime(date_str, "%Y-%m-%d").replace(hour=22, minute=0).isoformat() + "Z"
-
-        events = service.events().list(
-            calendarId=os.getenv("GOOGLE_CALENDAR_ID"),
-            timeMin=start,
-            timeMax=end,
-            singleEvents=True
-        ).execute().get("items", [])
-
-        return len(events)
-    except:
+        response = requests.get(
+            f"https://calendar-service-pl5m.onrender.com/events-count?date={date_str}",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("count", 0)
+        else:
+            print("Błąd odpowiedzi z calendar-service:", response.text)
+            return 0
+    except Exception as e:
+        print("Błąd połączenia z calendar-service:", e)
         return 0
-
 # ------------------ Zapisywanie wizyty ------------------
 
 @app.route("/pricing/book-visit", methods=["POST"])
