@@ -139,9 +139,9 @@ def base_price():
 
         result = {
             "service": row["Usługa"],
-            "netto": float(row["Cena netto"]),
-            "brutto_8": float(row["Brutto 8%"]),
-            "brutto_23": float(row["Brutto 23%"]),
+            "netto": float(str(row["Cena netto"]).replace(",", ".")),
+            "brutto_8": float(str(row["Brutto 8%"]).replace(",", ".")),
+            "brutto_23": float(str(row["Brutto 23%"]).replace(",", ".")),
             "czas": str(row["czas"])
         }
 
