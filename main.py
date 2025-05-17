@@ -276,6 +276,78 @@ def list_services():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# -------------------- Endpoint: Podsumowanie ceny --------------------
+@app.route("/pricing/full")
+def full_price():
+    try:
+        service = request.args.get("service")
+        address = request.args.get("address")
+        vat_rate = request.args.get("vat", "8")
+        date = request.args.get("date")
+        time_str = request.args.get("time")
+        package = request.args.get("package", "safe")
+        override = request.args.get("override", "false").lower() == "true"
+
+        if not all([service, address, date, time_str]):
+            return jsonify({"error": "Brak wymaganych danych"}), 400
+
+        # Krok 1: Cena bazowa
+        base = get_base_price(service)
+        if "error" in base:
+            return jsonify({"error": base["error"]}), 400
+       current_price = base["brutto_8"] if vat_rate == "8" else base["brutto_23"] # Domyślnie przyjmujemy 8% VAT
+
+        # Krok 2: Lokalizacja
+        location = calculate_location_modifier(address)
+        current_price *= location["modifier"]
+
+        # Krok 3: Kiedy
+        when = calculate_when_modifier(date)
+        current_price *= when["modifier"]
+
+        # Krok 4: Slot
+        slot = get_slot_modifier(
+            date_str=date,
+            hour_str=time_str,
+            location_type=location["location_type"],
+            visit_type=when["type"],
+            load_percentage=get_calendar_load(date),
+            override_now=override
+        )
+
+        # Dodatek: kwotowy (zł) jeśli np. slot E
+        slot_modifier = slot["modifier"]
+        if isinstance(slot_modifier, str) and "zł" in slot_modifier:
+            plus = int(slot_modifier.replace("+", "").replace("zł", ""))
+            current_price += plus
+        else:
+            current_price *= slot_modifier
+
+        # Krok 5: Pakiet
+        package_map = {
+            "safe": {"name": "Pakiet Safe", "modifier": 1.0},
+            "comfort": {"name": "Pakiet Comfort", "modifier": 1.25},
+            "priority": {"name": "Pakiet Priority", "modifier": 1.5},
+            "all": {"name": "Pakiet All Inclusive", "modifier": 2.0}
+        }
+        selected_package = package_map.get(package, package_map["safe"])
+        current_price *= selected_package["modifier"]
+
+        final_price = round(current_price, 2)
+
+        return jsonify({
+            "service": base["service"],
+            "base": base,
+            "location": location,
+            "when": when,
+            "slot": slot,
+            "package": selected_package,
+            "final_price": final_price
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # --------------------
 
 if __name__ == "__main__":
