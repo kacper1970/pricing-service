@@ -217,6 +217,21 @@ def get_slot_modifier(date_str, hour_str, location_type, visit_type, load_percen
             resp = client.get(f"/pricing/slot-modifier?{query}")
             return resp.get_json()
 
+@app.route("/pricing/services")
+def list_services():
+    try:
+        sheet_url = SERVICES_SHEET_URL
+        if not sheet_url:
+            return jsonify({"error": "Brak URL do arkusza usług"}), 500
+
+        csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+        df = pd.read_csv(csv_url)
+        services = df["Usługa"].dropna().unique().tolist()
+
+        return jsonify({"services": services})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 @app.route("/pricing/full")
 def full_price():
     try:
