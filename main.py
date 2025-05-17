@@ -153,71 +153,58 @@ def base_price():
 
 # -------------------- SLOT MODIFIER --------------------
 
-from datetime import datetime as dt
-import pytz
+from datetime import datetime, time
+import math
 
-@app.route("/pricing/slot-modifier")
-def slot_modifier():
-    try:
-        # Odbiór parametrów
-        date = request.args.get("date")  # format YYYY-MM-DD
-        hour = request.args.get("hour")  # format HH:MM
-        location_type = request.args.get("location_type")  # local_list, distance_local, distance_far
-        urgency_type = request.args.get("urgency_type")  # STANDARD, PILNA, NATYCHMIASTOWA, PLANOWA
+# Stałe slotów
+SLOT_A = {"name": "A", "days": [0, 1, 2, 3, 4], "start": time(8, 0), "end": time(14, 0), "locations": ["local_list"], "modifier": 0.9}
+SLOT_B = {"name": "B", "days": [0, 1, 2, 3, 4], "start": time(14, 0), "end": time(18, 0), "locations": ["local_list", "distance_local", "distance_far"], "modifier": 1.0}
+SLOT_C = {"name": "C", "days": [0, 1, 2, 3, 4], "start": time(8, 0), "end": time(18, 0), "locations": ["distance_local", "distance_far"]}
+SLOT_D = {"name": "D", "days": list(range(7)), "start": time(18, 0), "end": time(22, 0), "locations": ["local_list", "distance_local", "distance_far"], "modifier": 1.5}
+SLOT_E = {"name": "E", "days": [5, 6], "start": time(7, 0), "end": time(11, 0), "locations": ["local_list", "distance_local"]}
+SLOT_NOW = {"name": "NOW", "days": list(range(7)), "start": time(8, 0), "end": time(22, 0), "locations": ["local_list", "distance_local", "distance_far"]}
 
-        if not all([date, hour, location_type, urgency_type]):
-            return jsonify({"error": "Brakuje wymaganych parametrów"}), 400
 
-        # Przekształcenie daty i godziny
-        slot_time = dt.strptime(f"{date} {hour}", "%Y-%m-%d %H:%M")
-        weekday = slot_time.strftime("%A")
-        hour_only = slot_time.hour
+def calculate_dynamic_modifier(load_percentage, base_min, base_max):
+    """Interpoluje modyfikator między dwoma wartościami w zależności od obciążenia."""
+    return round(base_min + (base_max - base_min) * (load_percentage / 100), 2)
 
-        # SLOT NATYCHMIASTOWY – tylko przy trybie NATYCHMIASTOWA
-        if urgency_type.upper() == "NATYCHMIASTOWA":
-            if 8 <= hour_only < 22:
-                load_factor = get_calendar_load(date)
-                modifier = round(1.5 + (load_factor * 0.005), 2)  # +50% do +200%
-                modifier = min(max(modifier, 1.5), 3.0)
-                return jsonify({
-                    "slot": "NATYCHMIASTOWY",
-                    "modifier": modifier
-                })
-            else:
-                return jsonify({"error": "Poza godzinami slotu NATYCHMIASTOWEGO"}), 400
 
-        # SLOT A
-        if location_type == "local_list" and weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] and 8 <= hour_only < 14:
-            return jsonify({"slot": "A", "modifier": 0.9})
+def get_slot_modifier(date_str, hour_str, location_type, visit_type, load_percentage=50, override_now=False):
+    visit_date = datetime.strptime(date_str, "%Y-%m-%d")
+    visit_time = datetime.strptime(hour_str, "%H:%M").time()
+    weekday = visit_date.weekday()
 
-        # SLOT B
-        if weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] and 14 <= hour_only < 18:
-            return jsonify({"slot": "B", "modifier": 1.0})
+    # Slot NATYCHMIASTOWY (wymuszony lub automatyczny)
+    if visit_type == "NATYCHMIASTOWA" or override_now:
+        modifier = calculate_dynamic_modifier(load_percentage, 1.5, 3.0)
+        return {"slot": "NOW", "modifier": modifier}
 
-        # SLOT C
-        if location_type in ["distance_local", "distance_far"] and weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] and 8 <= hour_only < 18:
-            load_factor = get_calendar_load(date)
-            modifier = round(0.85 + (load_factor * 0.0035), 2)  # od 0.85 do 1.2
-            modifier = min(max(modifier, 0.85), 1.2)
-            return jsonify({
-                "slot": "C",
-                "modifier": modifier
-            })
+    # SLOT A
+    if location_type == "local_list" and weekday in SLOT_A["days"] and SLOT_A["start"] <= visit_time < SLOT_A["end"]:
+        return {"slot": "A", "modifier": SLOT_A["modifier"]}
 
-        # SLOT D
-        if 18 <= hour_only < 22:
-            if urgency_type.upper() != "NATYCHMIASTOWA":
-                return jsonify({"slot": "D", "modifier": 1.5})
-            else:
-                return jsonify({"slot": "D", "modifier": 1.0})
+    # SLOT B
+    if weekday in SLOT_B["days"] and location_type in SLOT_B["locations"] and SLOT_B["start"] <= visit_time < SLOT_B["end"]:
+        return {"slot": "B", "modifier": SLOT_B["modifier"]}
 
-        # SLOT E – soboty, niedziele i święta
-        if weekday in ["Saturday", "Sunday"] and 7 <= hour_only < 11:
-            if location_type in ["local_list", "distance_local"]:
-                if weekday == "Saturday":
-                    return jsonify({"slot": "E", "modifier": 1.0, "extra_fee": 50})
-                if weekday == "Sunday":
-                    return jsonify({"slot": "E", "modifier": 1.0, "extra_fee": 60})
+    # SLOT C
+    if weekday in SLOT_C["days"] and location_type in SLOT_C["locations"] and SLOT_C["start"] <= visit_time < SLOT_C["end"]:
+        modifier = calculate_dynamic_modifier(load_percentage, 0.85, 1.2)
+        return {"slot": "C", "modifier": modifier}
+
+    # SLOT D
+    if weekday in SLOT_D["days"] and location_type in SLOT_D["locations"] and SLOT_D["start"] <= visit_time < SLOT_D["end"]:
+        return {"slot": "D", "modifier": SLOT_D["modifier"]}
+
+    # SLOT E
+    if weekday in SLOT_E["days"] and location_type in SLOT_E["locations"] and SLOT_E["start"] <= visit_time < SLOT_E["end"]:
+        if weekday == 5:  # Sobota
+            return {"slot": "E", "modifier": "+50zł"}
+        elif weekday == 6:  # Niedziela
+            return {"slot": "E", "modifier": "+60zł"}
+
+    return {"slot": "UNKNOWN", "modifier": 1.0}
 
         return jsonify({"error": "Nie pasuje do żadnego slotu"}), 400
 
