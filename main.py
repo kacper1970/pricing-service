@@ -295,7 +295,9 @@ def full_price():
         base = get_base_price(service)
         if "error" in base:
             return jsonify({"error": base["error"]}), 400
-       current_price = base["brutto_8"] if vat_rate == "8" else base["brutto_23"] # Domyślnie przyjmujemy 8% VAT
+
+        # Ustal VAT brutto 8% lub 23%
+        current_price = base["brutto_8"] if vat_rate == "8" else base["brutto_23"]
 
         # Krok 2: Lokalizacja
         location = calculate_location_modifier(address)
@@ -315,7 +317,7 @@ def full_price():
             override_now=override
         )
 
-        # Dodatek: kwotowy (zł) jeśli np. slot E
+        # Obsługa modyfikatora slotu w formie kwoty (np. +50zł)
         slot_modifier = slot["modifier"]
         if isinstance(slot_modifier, str) and "zł" in slot_modifier:
             plus = int(slot_modifier.replace("+", "").replace("zł", ""))
@@ -333,6 +335,7 @@ def full_price():
         selected_package = package_map.get(package, package_map["safe"])
         current_price *= selected_package["modifier"]
 
+        # Finalizacja ceny
         final_price = round(current_price, 2)
 
         return jsonify({
