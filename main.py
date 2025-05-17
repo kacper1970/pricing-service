@@ -17,13 +17,17 @@ PRICE_PER_KM = float(os.getenv("PRICE_PER_KM", 2.0))
 
 # Funkcja do pobrania listy lokalnych adresów
 def get_local_addresses():
-    df = pd.read_csv(GOOGLE_SHEET_CSV_URL)
-    df = df.fillna("")
+    sheet_url = os.getenv("GOOGLE_SHEET_URL")
+    sheet_csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+
+    df = pd.read_csv(sheet_csv_url)
+
     addresses = [
-        f"{row['Ulica']} {row['nr. Domu']}, {row['Miasto']}".strip()
+        f"{row['Ulica'].strip()} {row['Nr domu']}, {row['Miasto'].strip()}".strip()
         for _, row in df.iterrows()
     ]
     return addresses
+
 
 
 # Funkcja do obliczenia odległości z Google Distance Matrix API
