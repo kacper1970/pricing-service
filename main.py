@@ -1,79 +1,46 @@
 import os
-import base64
-import pickle
 import requests
 import pandas as pd
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 app = Flask(__name__)
 CORS(app)
 
-# Wczytaj token OAuth z BASE64
-TOKEN_B64 = os.getenv("GOOGLE_TOKEN_B64")
+# Zmienne środowiskowe
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-SHEET_CSV_URL = os.getenv("LOCAL_ADDRESS_SHEET_CSV")
-BASE_ADDRESS = os.getenv("BASE_ADDRESS", "Królowej Elżbiety 1A, Świebodzice")
-
-# Koszt dojazdu za km (poza lokalną strefą)
-KM_COST = float(os.getenv("KM_COST", "2.00"))
+GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1PsEyAImKrre__68L5NYMQzd_z2kM_NooAwYhAK7Vgek/export?format=csv"
+BASE_ADDRESS = os.getenv("BASE_ADDRESS", "Królowej Elżbiety 1A, 58-160 Świebodzice")
+PRICE_PER_KM = float(os.getenv("PRICE_PER_KM", 2.0))
 
 
-def normalize_address(address):
-    """Uproszczony adres do dopasowania"""
-    return (
-        address.replace(",", " ")
-        .replace(".", " ")
-        .replace("-", " ")
-        .lower()
-        .strip()
-    )
+# Funkcja do pobrania listy lokalnych adresów
+def get_local_addresses():
+    df = pd.read_csv(GOOGLE_SHEET_CSV_URL)
+    df = df.fillna("")
+    addresses = [
+        f"{row['Ulica']} {row['nr. Domu']}, {row['Miasto']}".strip()
+        for _, row in df.iterrows()
+    ]
+    return addresses
 
 
-def load_local_addresses():
+# Funkcja do obliczenia odległości z Google Distance Matrix API
+def calculate_distance_km(origin, destination):
+    endpoint = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": origin,
+        "destinations": destination,
+        "key": GOOGLE_MAPS_API_KEY,
+        "units": "metric"
+    }
+    response = requests.get(endpoint, params=params)
+    data = response.json()
     try:
-        df = pd.read_csv(SHEET_CSV_URL)
-        df = df.fillna("")
-        df["pełny_adres"] = (
-            df["Ulica"].str.strip()
-            + " " + df["nr. Domu"].astype(str).str.strip()
-            + ", " + df["Miasto"].str.strip()
-            + ", " + df["Kod pocztowy"].str.strip()
-            + ", " + df["Województwo"].str.strip()
-            + ", " + df["Kraj"].str.strip()
-        )
-        df["adres_norm"] = df["pełny_adres"].apply(normalize_address)
-        return set(df["adres_norm"].values)
-    except Exception as e:
-        print(f"Błąd wczytywania adresów lokalnych: {e}")
-        return set()
-
-
-LOCAL_ADDRESSES = load_local_addresses()
-
-
-def get_distance_km(origin, destination):
-    try:
-        endpoint = "https://maps.googleapis.com/maps/api/distancematrix/json"
-        params = {
-            "origins": origin,
-            "destinations": destination,
-            "key": GOOGLE_MAPS_API_KEY,
-            "units": "metric",
-        }
-        response = requests.get(endpoint, params=params)
-        data = response.json()
-        element = data["rows"][0]["elements"][0]
-        if element["status"] == "OK":
-            distance_km = element["distance"]["value"] / 1000
-            return distance_km
-        else:
-            return None
-    except Exception as e:
-        print("Błąd Distance Matrix:", e)
+        distance_meters = data["rows"][0]["elements"][0]["distance"]["value"]
+        return distance_meters / 1000.0
+    except Exception:
         return None
 
 
@@ -88,33 +55,39 @@ def location_modifier():
     if not address:
         return jsonify({"error": "Brak adresu"}), 400
 
-    norm = normalize_address(address)
-    if norm in LOCAL_ADDRESSES:
+    # Sprawdzenie czy adres jest lokalny
+    local_addresses = get_local_addresses()
+    normalized_address = address.strip().lower()
+    is_local = any(normalized_address.startswith(local.strip().lower()) for local in local_addresses)
+
+    if is_local:
         return jsonify({
-            "location_type": "local_match",
-            "modifier": 0.9,  # -10%
-            "distance_km": 0.0,
-            "extra_fee": 0.0
+            "location_type": "local_list",
+            "modifier": 0.9,  # -10% znaczy mnożenie przez 0.9
+            "extra_fee": 0.0,
+            "distance_km": 0.0
         })
 
-    distance_km = get_distance_km(BASE_ADDRESS, address)
+    # Jeśli nie lokalny, oblicz odległość
+    distance_km = calculate_distance_km(BASE_ADDRESS, address)
     if distance_km is None:
         return jsonify({"error": "Nie udało się obliczyć odległości"}), 500
 
+    # Ustal modyfikator i opłatę
     if distance_km <= 20:
         modifier = 1.0
-        extra_fee = round(distance_km * KM_COST, 2)
+        extra_fee = PRICE_PER_KM * distance_km
         location_type = "distance_local"
     else:
-        modifier = 1.10  # +10%
-        extra_fee = round(distance_km * KM_COST, 2)
+        modifier = 1.1  # +10%
+        extra_fee = PRICE_PER_KM * distance_km
         location_type = "distance_far"
 
     return jsonify({
         "location_type": location_type,
         "modifier": modifier,
-        "distance_km": round(distance_km, 2),
-        "extra_fee": extra_fee
+        "extra_fee": round(extra_fee, 2),
+        "distance_km": round(distance_km, 2)
     })
 
 
