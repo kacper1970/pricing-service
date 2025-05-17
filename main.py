@@ -1,142 +1,161 @@
 import os
-import datetime
-import pandas as pd
-import requests
 import base64
 import pickle
-from flask import Flask, request, jsonify
+import requests
+import datetime
+import pandas as pd
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
 app = Flask(__name__)
 CORS(app)
 
-# Stała lokalizacja bazowa
-BASE_ADDRESS = os.getenv("BASE_ADDRESS", "Królowej Elżbiety 1A, 58-160 Świebodzice")
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-LOCAL_ADDRESSES_SHEET_URL = os.getenv("LOCAL_ADDRESSES_SHEET_URL")
-SERVICES_SHEET_URL = os.getenv("SERVICES_SHEET_URL")
+# Stałe i zmienne środowiskowe
 GOOGLE_TOKEN_B64 = os.getenv("GOOGLE_TOKEN_B64")
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID")
+LOCAL_ADDRESSES_SHEET_URL = os.getenv("LOCAL_ADDRESSES_SHEET_URL")
+PRICE_SHEET_URL = os.getenv("PRICE_SHEET_URL")
+BASE_ADDRESS = "Królowej Elżbiety 1A, 58-160 Świebodzice"
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-@app.route("/")
-def home():
-    return "✅ Pricing Service is running"
+# Google Calendar API service
 
-def get_distance_km(origin, destination):
-    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-    params = {
-        "origins": origin,
-        "destinations": destination,
-        "key": GOOGLE_MAPS_API_KEY
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    try:
-        distance_meters = data["rows"][0]["elements"][0]["distance"]["value"]
-        return round(distance_meters / 1000, 2)
-    except:
-        return None
+def get_calendar_service():
+    token_bytes = base64.b64decode(GOOGLE_TOKEN_B64)
+    creds = pickle.loads(token_bytes)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    return build('calendar', 'v3', credentials=creds)
+
+# Pobierz dane lokalnych adresów z arkusza Google
 
 def get_local_addresses():
     sheet_url = LOCAL_ADDRESSES_SHEET_URL
-    if not sheet_url:
-        return []
-    csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
-    df = pd.read_csv(csv_url)
+    sheet_csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+    df = pd.read_csv(sheet_csv_url)
     addresses = [
-        f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}, {row['Kod pocztowy']}, {row['Województwo']}, {row['Kraj']}"
+        f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip()
         for _, row in df.iterrows()
     ]
-    return addresses
+    return set(addresses)
+
+# Sprawdź typ lokalizacji i modyfikator na podstawie adresu
 
 @app.route("/pricing/location-modifier")
 def location_modifier():
-    address = request.args.get("address")
-    if not address:
-        return jsonify({"error": "Brak adresu"}), 400
-
-    local_list = get_local_addresses()
-    if address.strip() in [a.strip() for a in local_list]:
-        return jsonify({
-            "location_type": "local_list",
-            "modifier": 0.9,
-            "distance_km": 0.0,
-            "extra_fee": 0.0
-        })
-
-    distance = get_distance_km(BASE_ADDRESS, address)
-    if distance is None:
-        return jsonify({"error": "Nie udało się obliczyć odległości"})
-
-    if distance <= 20:
-        return jsonify({
-            "location_type": "distance_local",
-            "modifier": 1.0,
-            "distance_km": distance,
-            "extra_fee": round(distance * 2, 2)
-        })
-    else:
-        return jsonify({
-            "location_type": "distance_far",
-            "modifier": 1.1,
-            "distance_km": distance,
-            "extra_fee": round(distance * 2, 2)
-        })
-
-@app.route("/pricing/when-modifier")
-def when_modifier():
-    date_str = request.args.get("date")
-    if not date_str:
-        return jsonify({"error": "Brak daty"}), 400
     try:
-        target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        return jsonify({"error": "Niepoprawny format daty"}), 400
+        address = request.args.get("address")
+        if not address:
+            return jsonify({"error": "Brak adresu"}), 400
 
-    today = datetime.date.today()
-    delta_days = (target_date - today).days
+        local_addresses = get_local_addresses()
+        if any(address.lower().startswith(local.lower()) for local in local_addresses):
+            return jsonify({
+                "location_type": "local_list",
+                "modifier": 0.9,
+                "distance_km": 0.0,
+                "extra_fee": 0.0
+            })
 
-    if delta_days < 0:
-        return jsonify({"error": "Data z przeszłości"}), 400
-    elif delta_days <= 1:
-        return jsonify({"type": "NATYCHMIASTOWA", "modifier": 1.5})
-    elif 2 <= delta_days <= 6:
-        return jsonify({"type": "PILNA", "modifier": 1.25})
-    elif 7 <= delta_days <= 14:
-        return jsonify({"type": "STANDARD", "modifier": 1.0})
-    else:
-        return jsonify({"type": "PLANOWA", "modifier": 0.9})
+        # Odległość przez Google Distance Matrix
+        maps_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+        params = {
+            "origins": BASE_ADDRESS,
+            "destinations": address,
+            "key": GOOGLE_MAPS_API_KEY,
+            "units": "metric",
+        }
+        response = requests.get(maps_url, params=params)
+        data = response.json()
 
-def get_services_table():
-    csv_url = SERVICES_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
-    df = pd.read_csv(csv_url)
-    return df
+        if data['status'] != "OK" or not data['rows']:
+            return jsonify({"error": "Nie udało się obliczyć odległości"}), 400
 
-@app.route("/pricing/base-price")
-def base_price():
-    service_name = request.args.get("service")
-    if not service_name:
-        return jsonify({"error": "Brak nazwy usługi"}), 400
+        distance_km = data['rows'][0]['elements'][0]['distance']['value'] / 1000.0
 
-    try:
-        df = get_services_table()
-        service_row = df[df["Usługa"].str.lower() == service_name.lower()]
-        if service_row.empty:
-            return jsonify({"error": "Nie znaleziono usługi"}), 404
+        if distance_km <= 20:
+            modifier = 1.0
+            location_type = "distance_local"
+        else:
+            modifier = 1.1
+            location_type = "distance_far"
 
-        row = service_row.iloc[0]
+        extra_fee = round(distance_km * 2.0, 2)  # np. 2 zł/km
+
         return jsonify({
-            "service": row["Usługa"],
-            "netto": row["Cena netto"],
-            "brutto_8": row["Brutto 8%"],
-            "brutto_23": row["Brutto 23%"],
-            "time": row["czas"]
+            "location_type": location_type,
+            "modifier": modifier,
+            "distance_km": round(distance_km, 2),
+            "extra_fee": extra_fee
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Modyfikator KIEDY na podstawie daty
+
+@app.route("/pricing/when-modifier")
+def when_modifier():
+    try:
+        date_str = request.args.get("date")
+        if not date_str:
+            return jsonify({"error": "Brak daty"}), 400
+
+        today = datetime.date.today()
+        selected = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        delta = (selected - today).days
+
+        if delta < 0:
+            return jsonify({"error": "Data w przeszłości"}), 400
+        elif delta == 0 or delta == 1:
+            return jsonify({"type": "NATYCHMIASTOWA", "modifier": 1.5})
+        elif 2 <= delta <= 6:
+            return jsonify({"type": "PILNA", "modifier": 1.25})
+        elif 7 <= delta <= 14:
+            return jsonify({"type": "STANDARD", "modifier": 1.0})
+        else:
+            return jsonify({"type": "PLANOWA", "modifier": 0.90})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Cennik bazowy usług z arkusza Google
+
+def get_service_sheet():
+    sheet_url = SERVICES_SHEET_URL
+    sheet_csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+    df = pd.read_csv(sheet_csv_url)
+    return df
+
+@app.route("/pricing/base-price")
+def base_price():
+    try:
+        service_name = request.args.get("service")
+        if not service_name:
+            return jsonify({"error": "Brak nazwy usługi"}), 400
+
+        df = get_service_sheet()
+        row = df[df["Usługa"].str.lower() == service_name.lower()].squeeze()
+
+        if row.empty:
+            return jsonify({"error": "Nie znaleziono usługi"}), 404
+
+        return jsonify({
+            "service": service_name,
+            "netto": float(row["Cena netto"]),
+            "brutto_8": float(row["Brutto 8%"]),
+            "brutto_23": float(row["Brutto 23%"]),
+            "czas": int(row["czas"])
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/")
+def index():
+    return "✅ Pricing service is running"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
