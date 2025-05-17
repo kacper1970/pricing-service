@@ -306,6 +306,37 @@ def get_base_price(service_name):
     except Exception as e:
         return {"error": str(e)}
 # -------------------- Endpoint: Podsumowanie ceny --------------------
+from urllib.parse import quote
+
+def calculate_location_modifier(address):
+    """Lokalne wywołanie endpointu /pricing/location-modifier"""
+    with app.test_request_context():
+        with app.test_client() as client:
+            resp = client.get(f"/pricing/location-modifier?address={quote(address)}")
+            return resp.get_json()
+
+def calculate_when_modifier(date_str):
+    """Lokalne wywołanie endpointu /pricing/when-modifier"""
+    with app.test_request_context():
+        with app.test_client() as client:
+            resp = client.get(f"/pricing/when-modifier?date={quote(date_str)}")
+            return resp.get_json()
+
+def get_slot_modifier(date_str, hour_str, location_type, visit_type, load_percentage=0, override_now=False):
+    """Lokalne wywołanie endpointu /pricing/slot-modifier"""
+    params = {
+        "date": date_str,
+        "time": hour_str,
+        "urgency": visit_type,
+        "location": location_type,
+        "override": str(override_now).lower()
+    }
+    query = "&".join([f"{k}={quote(str(v))}" for k, v in params.items()])
+    with app.test_request_context():
+        with app.test_client() as client:
+            resp = client.get(f"/pricing/slot-modifier?{query}")
+            return resp.get_json()
+
 @app.route("/pricing/full")
 def full_price():
     try:
