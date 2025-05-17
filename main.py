@@ -356,32 +356,39 @@ def full_price():
         if "error" in base:
             return jsonify({"error": base["error"]}), 400
 
-        # Ustal VAT brutto 8% lub 23%
         current_price = base["brutto_8"] if vat_rate == "8" else base["brutto_23"]
 
         # Krok 2: Lokalizacja
         location = calculate_location_modifier(address)
+        if not location or "modifier" not in location:
+            return jsonify({"error": "Błąd w określaniu lokalizacji"}), 500
         current_price *= location["modifier"]
 
         # Krok 3: Kiedy
         when = calculate_when_modifier(date)
+        if not when or "modifier" not in when:
+            return jsonify({"error": "Błąd w określaniu terminu realizacji"}), 500
         current_price *= when["modifier"]
 
         # Krok 4: Slot
         slot = get_slot_modifier(
             date_str=date,
             hour_str=time_str,
-            location_type=location["location_type"],
-            visit_type=when["type"],
+            location_type=location.get("location_type", ""),
+            visit_type=when.get("type", ""),
             load_percentage=get_calendar_load(date),
             override_now=override
         )
+        if not slot or "modifier" not in slot:
+            return jsonify({"error": "Błąd w wyznaczeniu slotu"}), 500
 
-        # Obsługa modyfikatora slotu w formie kwoty (np. +50zł)
         slot_modifier = slot["modifier"]
         if isinstance(slot_modifier, str) and "zł" in slot_modifier:
-            plus = int(slot_modifier.replace("+", "").replace("zł", ""))
-            current_price += plus
+            try:
+                plus = int(slot_modifier.replace("+", "").replace("zł", ""))
+                current_price += plus
+            except:
+                return jsonify({"error": "Niepoprawny modyfikator kwotowy slotu"}), 500
         else:
             current_price *= slot_modifier
 
@@ -395,7 +402,6 @@ def full_price():
         selected_package = package_map.get(package, package_map["safe"])
         current_price *= selected_package["modifier"]
 
-        # Finalizacja ceny
         final_price = round(current_price, 2)
 
         return jsonify({
