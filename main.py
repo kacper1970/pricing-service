@@ -154,7 +154,6 @@ def base_price():
 # -------------------- SLOT MODIFIER --------------------
 
 from datetime import datetime, time
-import math
 
 # Stałe slotów
 SLOT_A = {"name": "A", "days": [0, 1, 2, 3, 4], "start": time(8, 0), "end": time(14, 0), "locations": ["local_list"], "modifier": 0.9}
@@ -164,47 +163,58 @@ SLOT_D = {"name": "D", "days": list(range(7)), "start": time(18, 0), "end": time
 SLOT_E = {"name": "E", "days": [5, 6], "start": time(7, 0), "end": time(11, 0), "locations": ["local_list", "distance_local"]}
 SLOT_NOW = {"name": "NOW", "days": list(range(7)), "start": time(8, 0), "end": time(22, 0), "locations": ["local_list", "distance_local", "distance_far"]}
 
+def calculate_dynamic_modifier(load, base_min, base_max):
+    """Interpoluje modyfikator na podstawie obciążenia."""
+    max_tasks = 20
+    if load <= 0:
+        return base_min
+    elif load >= max_tasks:
+        return base_max
+    else:
+        return round(base_min + (base_max - base_min) * (load / max_tasks), 2)
 
-def calculate_dynamic_modifier(load_percentage, base_min, base_max):
-    """Interpoluje modyfikator między dwoma wartościami w zależności od obciążenia."""
-    return round(base_min + (base_max - base_min) * (load_percentage / 100), 2)
+@app.route("/pricing/slot-modifier")
+def slot_modifier():
+    try:
+        date_str = request.args.get("date")         # np. 2025-05-21
+        time_str = request.args.get("time")         # np. 14:00
+        urgency = request.args.get("urgency")       # STANDARD, PILNA, etc.
+        location = request.args.get("location")     # local_list, distance_local, etc.
+        override = request.args.get("override", "false").lower() == "true"
 
+        visit_date = datetime.strptime(date_str, "%Y-%m-%d")
+        visit_time = datetime.strptime(time_str, "%H:%M").time()
+        weekday = visit_date.weekday()
+        load = get_calendar_load(date_str)
 
-def get_slot_modifier(date_str, hour_str, location_type, visit_type, load_percentage=50, override_now=False):
-    visit_date = datetime.strptime(date_str, "%Y-%m-%d")
-    visit_time = datetime.strptime(hour_str, "%H:%M").time()
-    weekday = visit_date.weekday()
+        # Slot NATYCHMIASTOWY (gdy wymuszony lub dla trybu NATYCHMIASTOWA)
+        if urgency == "NATYCHMIASTOWA" or override:
+            modifier = calculate_dynamic_modifier(load, 1.5, 3.0)
+            return jsonify({"slot": "NOW", "modifier": modifier})
 
-    # Slot NATYCHMIASTOWY (wymuszony lub automatyczny)
-    if visit_type == "NATYCHMIASTOWA" or override_now:
-        modifier = calculate_dynamic_modifier(load_percentage, 1.5, 3.0)
-        return {"slot": "NOW", "modifier": modifier}
+        # SLOT A
+        if location == "local_list" and weekday in SLOT_A["days"] and SLOT_A["start"] <= visit_time < SLOT_A["end"]:
+            return jsonify({"slot": "A", "modifier": SLOT_A["modifier"]})
 
-    # SLOT A
-    if location_type == "local_list" and weekday in SLOT_A["days"] and SLOT_A["start"] <= visit_time < SLOT_A["end"]:
-        return {"slot": "A", "modifier": SLOT_A["modifier"]}
+        # SLOT B
+        if location in SLOT_B["locations"] and weekday in SLOT_B["days"] and SLOT_B["start"] <= visit_time < SLOT_B["end"]:
+            return jsonify({"slot": "B", "modifier": SLOT_B["modifier"]})
 
-    # SLOT B
-    if weekday in SLOT_B["days"] and location_type in SLOT_B["locations"] and SLOT_B["start"] <= visit_time < SLOT_B["end"]:
-        return {"slot": "B", "modifier": SLOT_B["modifier"]}
+        # SLOT C
+        if location in SLOT_C["locations"] and weekday in SLOT_C["days"] and SLOT_C["start"] <= visit_time < SLOT_C["end"]:
+            modifier = calculate_dynamic_modifier(load, 0.85, 1.2)
+            return jsonify({"slot": "C", "modifier": modifier})
 
-    # SLOT C
-    if weekday in SLOT_C["days"] and location_type in SLOT_C["locations"] and SLOT_C["start"] <= visit_time < SLOT_C["end"]:
-        modifier = calculate_dynamic_modifier(load_percentage, 0.85, 1.2)
-        return {"slot": "C", "modifier": modifier}
+        # SLOT D
+        if location in SLOT_D["locations"] and weekday in SLOT_D["days"] and SLOT_D["start"] <= visit_time < SLOT_D["end"]:
+            return jsonify({"slot": "D", "modifier": SLOT_D["modifier"]})
 
-    # SLOT D
-    if weekday in SLOT_D["days"] and location_type in SLOT_D["locations"] and SLOT_D["start"] <= visit_time < SLOT_D["end"]:
-        return {"slot": "D", "modifier": SLOT_D["modifier"]}
-
-    # SLOT E
-    if weekday in SLOT_E["days"] and location_type in SLOT_E["locations"] and SLOT_E["start"] <= visit_time < SLOT_E["end"]:
-        if weekday == 5:  # Sobota
-            return {"slot": "E", "modifier": "+50zł"}
-        elif weekday == 6:  # Niedziela
-            return {"slot": "E", "modifier": "+60zł"}
-
-    return {"slot": "UNKNOWN", "modifier": 1.0}
+        # SLOT E
+        if location in SLOT_E["locations"] and weekday in SLOT_E["days"] and SLOT_E["start"] <= visit_time < SLOT_E["end"]:
+            if weekday == 5:
+                return jsonify({"slot": "E", "modifier": "+50zł"})
+            elif weekday == 6:
+                return jsonify({"slot": "E", "modifier": "+60zł"})
 
         return jsonify({"error": "Nie pasuje do żadnego slotu"}), 400
 
@@ -230,6 +240,23 @@ def get_calendar_load(date_str):
         return len(events)
     except:
         return 0
+# ------------------ Zapisywanie wizyty ------------------
+@app.route("/pricing/book-visit", methods=["POST"])
+def book_visit():
+    try:
+        data = request.get_json()
+        response = requests.post(
+            "https://calendar-service-pl5m.onrender.com/create-event",
+            json=data,
+            timeout=10
+        )
+        if response.status_code == 200:
+            return jsonify({"status": "OK", "message": "Wizyta zapisana w kalendarzu"})
+        else:
+            return jsonify({"status": "Błąd", "details": response.text}), response.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # --------------------
 
