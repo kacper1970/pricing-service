@@ -1,135 +1,86 @@
 import os
-import json
-import math
+import csv
+import io
+import pickle
+import base64
 import requests
+import googlemaps
+import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime
-from urllib.parse import quote_plus
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
 app = Flask(__name__)
 CORS(app)
 
-# Cennik podstawowy (może być wczytywany z Google Sheets w przyszłości)
-BASE_PRICING = {
-    "pomiary": 150,
-    "montaz_lampy": 120,
-    "naprawa_gniazdka": 100
-}
+# Ustawienia środowiskowe
+token_b64 = os.getenv("GOOGLE_TOKEN_B64")
+calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
+google_sheets_url = os.getenv("LOCAL_ADDRESS_SHEET")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-# VAT
-VAT_8 = 1.08
-VAT_23 = 1.23
+BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
+COST_PER_KM = 2  # przykładowa stawka za km poza lokalnym obszarem
 
-# Google Sheets - lokalne adresy (publiczny dostęp jako CSV)
-LOCAL_ADDRESSES_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTUKhHdJcKdpvVi6LTlNvLPWzr0LhoZRo3VcfV31KjoqAnWn-wG6nLNsUjUzv9RR1Vz6AfdhMA4Qsiu/pub?output=csv"
+gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
 
-# Modyfikatory (przykładowe)
-MODYFIKATORY = {
-    "GDZIE": {
-        "lokalna": 1.0,
-        "<=20km": 1.0,  # + koszt dojazdu dodany osobno
-        ">20km": 1.1   # + koszt dojazdu dodany osobno
-    },
-    "KIEDY": {
-        "planowa": 1.0,
-        "standard": 1.0,
-        "pilna": 1.2,
-        "natychmiastowa": 1.5
-    },
-    "PAKIET": {
-        "safe": 1.0,
-        "comfort": 1.25,
-        "priority": 1.5,
-        "all_inclusive": 2.0
-    }
-}
-
-DOJAZD_KM_CENA = 2.0  # zł za kilometr w jedną stronę (sztywna opłata)
-PUNKT_BAZOWY = "Królowej Elżbiety 1A, Świebodzice"
-
-# Mock funkcja odległości (tu powinno być API mapowe np. Google Maps Distance Matrix)
-def oblicz_odleglosc(adres):
-    # TODO: Zaimplementować z API mapowym
-    return 18  # przykładowa wartość km
-
-def pobierz_lokalne_adresy():
-    try:
-        response = requests.get(LOCAL_ADDRESSES_CSV)
-        lines = response.text.strip().split("\n")
-        lokalne = set()
-        for line in lines[1:]:
-            parts = line.split(",")
-            if len(parts) >= 3:
-                ulica = parts[0].strip().lower()
-                nr_domu = parts[1].strip().lower()
-                miasto = parts[2].strip().lower()
-                lokalne.add(f"{ulica} {nr_domu}, {miasto}")
-        return lokalne
-    except Exception as e:
-        print("Błąd podczas pobierania lokalnych adresów:", e)
-        return set()
-
-def czy_adres_lokalny(adres, lokalne_adresy):
-    adres = adres.strip().lower()
-    return adres in lokalne_adresy
-
-def wylicz_cene(adres, usluga, typ_klienta, kiedy, pakiet):
-    lokalne_adresy = pobierz_lokalne_adresy()
-    cena_netto = BASE_PRICING.get(usluga, 0)
-
-    # GDZIE
-    if czy_adres_lokalny(adres, lokalne_adresy):
-        cena = cena_netto * MODYFIKATORY["GDZIE"]["lokalna"]
-        dojazd = 0
-    else:
-        dystans = oblicz_odleglosc(adres)
-        if dystans <= 20:
-            cena = cena_netto * MODYFIKATORY["GDZIE"]["<=20km"]
-            dojazd = dystans * DOJAZD_KM_CENA
-        else:
-            cena = cena_netto * MODYFIKATORY["GDZIE"][">20km"]
-            dojazd = dystans * DOJAZD_KM_CENA
-
-    # KIEDY
-    cena *= MODYFIKATORY["KIEDY"].get(kiedy, 1.0)
-
-    # SLOT – pomijamy na razie, dojdzie później
-
-    # PAKIET
-    cena *= MODYFIKATORY["PAKIET"].get(pakiet, 1.0)
-
-    # VAT
-    if typ_klienta == "firma":
-        cena_brutto = cena * VAT_23
-    else:
-        cena_brutto = cena * VAT_8
-
-    return round(cena_brutto + dojazd, 2)
-
-@app.route("/pricing", methods=["POST"])
-def pricing():
-    data = request.json
-    adres = data.get("adres")
-    usluga = data.get("usluga")
-    typ_klienta = data.get("typ_klienta", "osoba")
-    kiedy = data.get("kiedy", "standard")
-    pakiet = data.get("pakiet", "safe")
-
-    if not adres or not usluga:
-        return jsonify({"error": "Brak adresu lub usługi"}), 400
-
-    cena = wylicz_cene(adres, usluga, typ_klienta, kiedy, pakiet)
-    return jsonify({
-        "adres": adres,
-        "usluga": usluga,
-        "cena_brutto": cena,
-        "waluta": "PLN"
-    })
 
 @app.route("/")
 def home():
     return "✅ Pricing service is running"
+
+
+def get_distance_km(from_address, to_address):
+    try:
+        result = gmaps.distance_matrix(origins=[from_address], destinations=[to_address], mode="driving")
+        distance_meters = result["rows"][0]["elements"][0]["distance"]["value"]
+        return distance_meters / 1000  # w km
+    except Exception as e:
+        print("Błąd Google Maps:", e)
+        return None
+
+
+def is_local_address(client_address):
+    try:
+        sheet_csv_url = google_sheets_url.replace("/edit?usp=sharing", "/export?format=csv")
+        response = requests.get(sheet_csv_url)
+        response.encoding = 'utf-8'
+        f = io.StringIO(response.text)
+        reader = csv.DictReader(f)
+        for row in reader:
+            address_str = f"{row['Ulica']} {row['nr. Domu']}, {row['Miasto']}"
+            if address_str.strip().lower() == client_address.strip().lower():
+                return True
+    except Exception as e:
+        print("Błąd podczas sprawdzania adresu lokalnego:", e)
+    return False
+
+
+@app.route("/check-location", methods=[POST])
+def check_location():
+    data = request.get_json()
+    ulica = data.get("ulica")
+    nr_domu = data.get("nr_domu")
+    miasto = data.get("miasto")
+
+    if not (ulica and nr_domu and miasto):
+        return jsonify({"error": "Brak danych adresowych"}), 400
+
+    full_address = f"{ulica} {nr_domu}, {miasto}"
+
+    if is_local_address(full_address):
+        return jsonify({"type": "lokalny", "modifier": 1.0, "travel_cost": 0})
+
+    distance = get_distance_km(BASE_ADDRESS, full_address)
+    if distance is None:
+        return jsonify({"type": "unknown", "modifier": 1.0, "travel_cost": 0})
+
+    if distance <= 20:
+        return jsonify({"type": "dojazd <=20km", "modifier": 1.0, "travel_cost": round(distance * COST_PER_KM, 2)})
+    else:
+        return jsonify({"type": "dojazd >20km", "modifier": 1.1, "travel_cost": round(distance * COST_PER_KM, 2)})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
