@@ -287,10 +287,12 @@ def get_base_price(service_name):
         csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
         df = pd.read_csv(csv_url)
 
-        # Upewniamy się, że liczby są z kropkami, a nie przecinkami i mają prawidłowy typ
-        df["Cena netto"] = df["Cena netto"].astype(str).str.replace(",", ".").astype(float)
-        df["Brutto 8%"] = df["Brutto 8%"].astype(str).str.replace(",", ".").astype(float)
-        df["Brutto 23%"] = df["Brutto 23%"].astype(str).str.replace(",", ".").astype(float)
+        # Usuwamy spacje, \xa0 i zamieniamy przecinki na kropki
+        for col in ["Cena netto", "Brutto 8%", "Brutto 23%"]:
+            df[col] = df[col].astype(str).str.replace("\xa0", "", regex=False)
+            df[col] = df[col].str.replace(" ", "", regex=False)
+            df[col] = df[col].str.replace(",", ".", regex=False)
+            df[col] = df[col].astype(float)
 
         row = df[df["Usługa"].str.lower().str.strip() == service_name.lower().strip()].iloc[0]
 
