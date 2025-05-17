@@ -231,6 +231,34 @@ def list_services():
         return jsonify({"services": services})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def get_base_price(service_name):
+    try:
+        sheet_url = os.getenv("SERVICES_SHEET_URL")
+        if not sheet_url:
+            return {"error": "Brak URL do arkusza cen"}
+
+        csv_url = sheet_url.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+        df = pd.read_csv(csv_url)
+
+        # Usuwamy spacje, \xa0 i zamieniamy przecinki na kropki
+        for col in ["Cena netto", "Brutto 8%", "Brutto 23%"]:
+            df[col] = df[col].astype(str).str.replace("\xa0", "", regex=False)
+            df[col] = df[col].str.replace(" ", "", regex=False)
+            df[col] = df[col].str.replace(",", ".", regex=False)
+            df[col] = df[col].astype(float)
+
+        row = df[df["Usługa"].str.lower().str.strip() == service_name.lower().strip()].iloc[0]
+
+        return {
+            "service": row["Usługa"],
+            "netto": row["Cena netto"],
+            "brutto_8": row["Brutto 8%"],
+            "brutto_23": row["Brutto 23%"],
+            "czas": str(row["czas"]) if "czas" in row else ""
+        }
+    except Exception as e:
+        return {"error": str(e)}
         
 @app.route("/pricing/full")
 def full_price():
