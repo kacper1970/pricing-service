@@ -13,6 +13,16 @@ from urllib.parse import quote
 app = Flask(__name__)
 CORS(app)
 
+
+LOG_FILE = "logs.txt"
+
+def log_to_file(message):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        print(f"[BŁĄD LOGOWANIA] {e}", flush=True)
 # ✅ Weryfikacja zmiennych środowiskowych
 REQUIRED_ENV_VARS = [
     "GOOGLE_MAPS_API_KEY",
@@ -307,29 +317,33 @@ def full_price():
         package = request.args.get("package", "safe")
         override = request.args.get("override", "false").lower() == "true"
 
+        log_to_file(f"➡️ Zapytanie /pricing/full - Usługa: {service}, Adres: {address}, Data: {date}, Godzina: {time_str}, VAT: {vat_rate}, Pakiet: {package}, Override: {override}")
+
         if not all([service, address, date, time_str]):
             return jsonify({"error": "Brak wymaganych danych"}), 400
 
-        # Krok 1: Cena bazowa
         base = get_base_price(service)
         if "error" in base:
+            log_to_file(f"❌ Błąd ceny bazowej: {base['error']}")
             return jsonify({"error": base["error"]}), 400
 
         current_price = base["brutto_8"] if vat_rate == "8" else base["brutto_23"]
+        log_to_file(f"🔹 Cena bazowa (brutto): {current_price}")
 
-        # Krok 2: Lokalizacja
         location = calculate_location_modifier(address)
         if not location or "modifier" not in location:
+            log_to_file("❌ Błąd lokalizacji")
             return jsonify({"error": "Błąd w określaniu lokalizacji"}), 500
         current_price *= location["modifier"]
+        log_to_file(f"📍 Lokalizacja: {location['location_type']}, Modyfikator: {location['modifier']}")
 
-        # Krok 3: Kiedy
         when = calculate_when_modifier(date)
         if not when or "modifier" not in when:
+            log_to_file("❌ Błąd terminu")
             return jsonify({"error": "Błąd w określaniu terminu realizacji"}), 500
         current_price *= when["modifier"]
+        log_to_file(f"🗓️ Kiedy: {when['type']}, Modyfikator: {when['modifier']}")
 
-        # Krok 4: Slot
         slot = get_slot_modifier(
             date_str=date,
             hour_str=time_str,
@@ -339,6 +353,7 @@ def full_price():
             override_now=override
         )
         if not slot or "modifier" not in slot:
+            log_to_file("❌ Błąd slotu")
             return jsonify({"error": "Błąd w wyznaczeniu slotu"}), 500
 
         slot_modifier = slot["modifier"]
@@ -346,12 +361,14 @@ def full_price():
             try:
                 plus = int(slot_modifier.replace("+", "").replace("zł", ""))
                 current_price += plus
+                log_to_file(f"⏱️ Slot (kwotowy): +{plus}zł")
             except:
+                log_to_file("❌ Błąd przeliczenia modyfikatora kwotowego slotu")
                 return jsonify({"error": "Niepoprawny modyfikator kwotowy slotu"}), 500
         else:
             current_price *= slot_modifier
+            log_to_file(f"⏱️ Slot: {slot['slot']}, Modyfikator: {slot_modifier}")
 
-        # Krok 5: Pakiet
         package_map = {
             "safe": {"name": "Pakiet Safe", "modifier": 1.0},
             "comfort": {"name": "Pakiet Comfort", "modifier": 1.25},
@@ -360,8 +377,10 @@ def full_price():
         }
         selected_package = package_map.get(package, package_map["safe"])
         current_price *= selected_package["modifier"]
+        log_to_file(f"📦 Pakiet: {selected_package['name']}, Modyfikator: {selected_package['modifier']}")
 
         final_price = round(current_price, 2)
+        log_to_file(f"✅ Cena końcowa: {final_price} zł")
 
         return jsonify({
             "service": base["service"],
@@ -374,8 +393,16 @@ def full_price():
         })
 
     except Exception as e:
+        log_to_file(f"💥 Wyjątek: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/logs.txt")
+def logs():
+    try:
+        with open("logs.txt", "r", encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception as e:
+        return f"Błąd odczytu logów: {e}", 500
 
 # -------------------- ulice lokalne --------------------
 
