@@ -61,43 +61,6 @@ def index():
     log_to_file("✅ Pricing Service uruchomiony")
     return "✅ Pricing Service działa"
    
-# -------------------- MODYFIKATOR GDZIE --------------------
-def get_local_addresses():
-    """
-    Wczytuje adresy lokalne z arkusza Google i tworzy listę
-    zawierającą adresy zarówno w formacie z kodem pocztowym, jak i bez.
-    """
-    try:
-        csv_url = ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
-        df = pd.read_csv(csv_url)
-
-        addresses = []
-
-        for _, row in df.iterrows():
-            # Format bez kodu pocztowego
-            addr1 = f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip()
-            # Format z kodem pocztowym
-            addr2 = f"{row['Ulica']} {row['Nr domu']}, {row['Kod pocztowy']} {row['Miasto']}".strip()
-
-            addresses.append(addr1)
-            addresses.append(addr2)
-
-        return addresses
-    except Exception as e:
-        print(f"Błąd wczytywania lokalnych adresów: {e}")
-        return []
-
-def calculate_distance_km(origin, destination):
-    try:
-        url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-        params = {"origins": origin, "destinations": destination, "key": GOOGLE_MAPS_API_KEY, "language": "pl"}
-        response = requests.get(url, params=params).json()
-        meters = response["rows"][0]["elements"][0]["distance"]["value"]
-        return round(meters / 1000.0, 2)
-    except Exception as e:
-        print(f"Błąd obliczania dystansu: {e}")
-        return None
-
 @app.route("/pricing/location-modifier")
 def location_modifier():
     address = request.args.get("address", "").strip().lower()
@@ -129,7 +92,7 @@ def location_modifier():
             return jsonify({
                 "location_type": "local_list",
                 "modifier": LOCAL_MODIFIER,
-                "extra_fee": 0.0,
+                "extra_cost": 0.0,
                 "distance_km": 0.0
             })
 
@@ -140,20 +103,22 @@ def location_modifier():
 
         location_type = "distance_local" if distance <= FAR_THRESHOLD_KM else "distance_far"
         modifier = 1.0 if location_type == "distance_local" else FAR_MODIFIER
-        extra_fee = round(distance * BASE_FEE_KM, 2)
+        extra_cost = round(distance * BASE_FEE_KM, 2)
 
-        log_to_file(f"📏 Adres spoza listy. Typ: {location_type}, Dystans: {distance} km, Dopłata: {extra_fee} zł")
+        log_to_file(f"📏 Adres spoza listy. Typ: {location_type}, Dystans: {distance} km, Dopłata: {extra_cost} zł")
 
         return jsonify({
             "location_type": location_type,
             "modifier": modifier,
-            "extra_fee": extra_fee,
+            "extra_cost": extra_cost,
             "distance_km": distance
         })
 
     except Exception as e:
         log_to_file(f"💥 Błąd w location-modifier: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+
 # -------------------- MODYFIKATOR KIEDY --------------------
 @app.route("/pricing/when-modifier")
 def when_modifier():
