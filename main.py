@@ -61,6 +61,28 @@ def index():
     log_to_file("✅ Pricing Service uruchomiony")
     return "✅ Pricing Service działa"
    
+import requests
+import pandas as pd
+from flask import request, jsonify
+
+# 🔧 Funkcja pomocnicza: oblicz dystans w km
+def calculate_distance_km(origin, destination):
+    try:
+        url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+        params = {
+            "origins": origin,
+            "destinations": destination,
+            "key": GOOGLE_MAPS_API_KEY,
+            "language": "pl"
+        }
+        response = requests.get(url, params=params).json()
+        meters = response["rows"][0]["elements"][0]["distance"]["value"]
+        return round(meters / 1000.0, 2)
+    except Exception as e:
+        print(f"Błąd obliczania dystansu: {e}")
+        return None
+
+# 🧠 Endpoint
 @app.route("/pricing/location-modifier")
 def location_modifier():
     address = request.args.get("address", "").strip().lower()
@@ -96,7 +118,7 @@ def location_modifier():
                 "distance_km": 0.0
             })
 
-        # Jeśli nie znaleziono — sprawdź odległość
+        # 🔄 Jeśli nie znaleziono – sprawdź odległość
         distance = calculate_distance_km(BASE_ADDRESS, address)
         if distance is None:
             return jsonify({"error": "Nie udało się obliczyć odległości"}), 500
