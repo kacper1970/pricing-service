@@ -375,6 +375,24 @@ def full_price():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# -------------------- ulice lokalne --------------------
+
+@app.route("/pricing/local-streets")
+def local_streets():
+    try:
+        csv_url = ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+        df = pd.read_csv(csv_url)
+
+        if "Ulica" not in df.columns:
+            return jsonify({"error": "Brak kolumny 'Ulica' w arkuszu"}), 500
+
+        unique_streets = sorted(df["Ulica"].dropna().unique().tolist())
+        return jsonify({"streets": unique_streets})
+
+    except Exception as e:
+        return jsonify({"error": f"Błąd wczytywania ulic: {str(e)}"}), 500
 # -------------------- MAIN --------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
