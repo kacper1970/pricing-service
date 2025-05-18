@@ -44,10 +44,26 @@ def index():
     return "✅ Pricing Service działa"
 # -------------------- MODYFIKATOR GDZIE --------------------
 def get_local_addresses():
+    """
+    Wczytuje adresy lokalne z arkusza Google i tworzy listę
+    zawierającą adresy zarówno w formacie z kodem pocztowym, jak i bez.
+    """
     try:
         csv_url = ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
         df = pd.read_csv(csv_url)
-        return [f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip() for _, row in df.iterrows()]
+
+        addresses = []
+
+        for _, row in df.iterrows():
+            # Format bez kodu pocztowego
+            addr1 = f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip()
+            # Format z kodem pocztowym
+            addr2 = f"{row['Ulica']} {row['Nr domu']}, {row['Kod pocztowy']} {row['Miasto']}".strip()
+
+            addresses.append(addr1)
+            addresses.append(addr2)
+
+        return addresses
     except Exception as e:
         print(f"Błąd wczytywania lokalnych adresów: {e}")
         return []
@@ -71,10 +87,8 @@ def location_modifier():
     try:
         # Normalizacja do porównania 1:1
         address_clean = address.lower().strip()
-        local_addresses_clean = [
-            f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip().lower()
-            for _, row in pd.read_csv(ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")).iterrows()
-        ]
+        local_addresses_clean = [a.lower().strip() for a in get_local_addresses()]
+
         if address_clean in local_addresses_clean:
             return jsonify({
                 "location_type": "local_list",
