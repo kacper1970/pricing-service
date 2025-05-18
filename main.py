@@ -69,17 +69,39 @@ def location_modifier():
     if not address:
         return jsonify({"error": "Brak adresu"}), 400
     try:
-        if any(address.lower() in a.lower() for a in get_local_addresses()):
-            return jsonify({"location_type": "local_list", "modifier": LOCAL_MODIFIER, "extra_fee": 0.0, "distance_km": 0.0})
+        # Normalizacja do porównania 1:1
+        address_clean = address.lower().strip()
+        local_addresses_clean = [
+            f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip().lower()
+            for _, row in pd.read_csv(ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")).iterrows()
+        ]
+        if address_clean in local_addresses_clean:
+            return jsonify({
+                "location_type": "local_list",
+                "modifier": LOCAL_MODIFIER,
+                "extra_fee": 0.0,
+                "distance_km": 0.0
+            })
+
+        # Jeśli nie jest lokalny — sprawdź dystans
         distance = calculate_distance_km(BASE_ADDRESS, address)
         if distance is None:
             return jsonify({"error": "Nie udało się obliczyć odległości"}), 500
         if distance <= FAR_THRESHOLD_KM:
-            return jsonify({"location_type": "distance_local", "modifier": 1.0, "extra_fee": round(distance * BASE_FEE_KM, 2), "distance_km": distance})
-        return jsonify({"location_type": "distance_far", "modifier": FAR_MODIFIER, "extra_fee": round(distance * BASE_FEE_KM, 2), "distance_km": distance})
+            return jsonify({
+                "location_type": "distance_local",
+                "modifier": 1.0,
+                "extra_fee": round(distance * BASE_FEE_KM, 2),
+                "distance_km": distance
+            })
+        return jsonify({
+            "location_type": "distance_far",
+            "modifier": FAR_MODIFIER,
+            "extra_fee": round(distance * BASE_FEE_KM, 2),
+            "distance_km": distance
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-        
 # -------------------- MODYFIKATOR KIEDY --------------------
 @app.route("/pricing/when-modifier")
 def when_modifier():
