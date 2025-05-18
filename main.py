@@ -14,8 +14,15 @@ app = Flask(__name__)
 CORS(app)
 
 
+# Ścieżka do pliku logów
 LOG_FILE = "logs.txt"
 
+# 🔧 Upewnij się, że plik logów istnieje
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        f.write("[Start logowania Pricing Service]\n")
+
+# ✅ Funkcja logująca do pliku
 def log_to_file(message):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -51,7 +58,9 @@ LOCAL_MODIFIER = float(os.getenv("LOCAL_MODIFIER", "0.9"))
 
 @app.route("/")
 def index():
+    log_to_file("✅ Pricing Service uruchomiony")
     return "✅ Pricing Service działa"
+   
 # -------------------- MODYFIKATOR GDZIE --------------------
 def get_local_addresses():
     """
