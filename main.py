@@ -91,15 +91,32 @@ def calculate_distance_km(origin, destination):
 
 @app.route("/pricing/location-modifier")
 def location_modifier():
-    address = request.args.get("address")
+    address = request.args.get("address", "").strip().lower()
     if not address:
         return jsonify({"error": "Brak adresu"}), 400
-    try:
-        # Normalizacja do porównania 1:1
-        address_clean = address.lower().strip()
-        local_addresses_clean = [a.lower().strip() for a in get_local_addresses()]
 
-        if address_clean in local_addresses_clean:
+    try:
+        log_to_file(f"➡️ Sprawdzany adres: {address}")
+        csv_url = ADDRESS_SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+        df = pd.read_csv(csv_url)
+
+        match_found = False
+        for _, row in df.iterrows():
+            addr1 = f"{row['Ulica']} {row['Nr domu']}, {row['Miasto']}".strip().lower()
+            addr2 = f"{row['Ulica']} {row['Nr domu']}, {row['Kod pocztowy']} {row['Miasto']}".strip().lower()
+
+            if address == addr1:
+                log_to_file(f"✅ Dopasowano adres (wariant 1): {addr1}")
+                match_found = True
+                break
+            elif address == addr2:
+                log_to_file(f"✅ Dopasowano adres (wariant 2): {addr2}")
+                match_found = True
+                break
+            else:
+                log_to_file(f"❌ Brak dopasowania: {address} ≠ {addr1} ani {addr2}")
+
+        if match_found:
             return jsonify({
                 "location_type": "local_list",
                 "modifier": LOCAL_MODIFIER,
@@ -107,24 +124,26 @@ def location_modifier():
                 "distance_km": 0.0
             })
 
-        # Jeśli nie jest lokalny — sprawdź dystans
+        # Jeśli nie znaleziono — sprawdź odległość
         distance = calculate_distance_km(BASE_ADDRESS, address)
         if distance is None:
             return jsonify({"error": "Nie udało się obliczyć odległości"}), 500
-        if distance <= FAR_THRESHOLD_KM:
-            return jsonify({
-                "location_type": "distance_local",
-                "modifier": 1.0,
-                "extra_fee": round(distance * BASE_FEE_KM, 2),
-                "distance_km": distance
-            })
+
+        location_type = "distance_local" if distance <= FAR_THRESHOLD_KM else "distance_far"
+        modifier = 1.0 if location_type == "distance_local" else FAR_MODIFIER
+        extra_fee = round(distance * BASE_FEE_KM, 2)
+
+        log_to_file(f"📏 Adres spoza listy. Typ: {location_type}, Dystans: {distance} km, Dopłata: {extra_fee} zł")
+
         return jsonify({
-            "location_type": "distance_far",
-            "modifier": FAR_MODIFIER,
-            "extra_fee": round(distance * BASE_FEE_KM, 2),
+            "location_type": location_type,
+            "modifier": modifier,
+            "extra_fee": extra_fee,
             "distance_km": distance
         })
+
     except Exception as e:
+        log_to_file(f"💥 Błąd w location-modifier: {str(e)}")
         return jsonify({"error": str(e)}), 500
 # -------------------- MODYFIKATOR KIEDY --------------------
 @app.route("/pricing/when-modifier")
