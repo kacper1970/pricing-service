@@ -382,8 +382,9 @@ def full_price():
             "when": when,
             "slot": slot,
             "package": selected_package,
-            "final_price": final_price
-        })
+            "final_price": final_price,
+            "extra_cost": location.get("extra_cost", 0.0)
+            })
 
     except Exception as e:
         log_to_file(f"💥 Wyjątek: {str(e)}")
